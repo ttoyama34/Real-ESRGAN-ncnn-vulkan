@@ -31,7 +31,7 @@ namespace fs = std::filesystem;
 #include <wchar.h>
 static wchar_t* optarg = NULL;
 static int optind = 1;
-static wchar_t getopt(int argc, wchar_t* const argv[], const wchar_t* optstring)
+static int getopt(int argc, wchar_t* const argv[], const wchar_t* optstring)
 {
     if (optind >= argc || argv[optind][0] != L'-')
         return -1;
@@ -54,7 +54,7 @@ static wchar_t getopt(int argc, wchar_t* const argv[], const wchar_t* optstring)
 
     optind++;
 
-    return opt;
+    return static_cast<int>(opt);
 }
 
 static std::vector<int> parse_optarg_int_array(const wchar_t* optarg)
@@ -115,6 +115,7 @@ static void print_usage()
     fprintf(stderr, "  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu\n");
     fprintf(stderr, "  -x                   enable tta mode\n");
     fprintf(stderr, "  -f format            output image format (jpg/png/webp, default=ext/png)\n");
+    fprintf(stderr, "  -q quality           output jpg/webp quality (0-100/-1=lossless or best, default=-1)\n");
     fprintf(stderr, "  -v                   verbose output\n");
 }
 
@@ -338,12 +339,14 @@ class SaveThreadParams
 {
 public:
     int verbose;
+    int quality;
 };
 
 void* save(void* args)
 {
     const SaveThreadParams* stp = (const SaveThreadParams*)args;
     const int verbose = stp->verbose;
+    const int quality = stp->quality;
 
     for (;;)
     {
@@ -385,7 +388,7 @@ void* save(void* args)
 
         if (ext == PATHSTR("webp") || ext == PATHSTR("WEBP"))
         {
-            success = webp_save(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, (const unsigned char*)v.outimage.data);
+            success = webp_save(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, quality, (const unsigned char*)v.outimage.data);
         }
         else if (ext == PATHSTR("png") || ext == PATHSTR("PNG"))
         {
@@ -398,9 +401,10 @@ void* save(void* args)
         else if (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG"))
         {
 #if _WIN32
-            success = wic_encode_jpeg_image(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data);
+            success = wic_encode_jpeg_image(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, quality, v.outimage.data);
 #else
-            success = stbi_write_jpg(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data, 100);
+            int q = quality < 0 ? 100 : std::max(quality, 1);
+            success = stbi_write_jpg(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data, q);
 #endif
         }
         if (success)
@@ -447,11 +451,12 @@ int main(int argc, char** argv)
     int verbose = 0;
     int tta_mode = 0;
     path_t format = PATHSTR("png");
+    int quality = -1;
 
+    int opt;
 #if _WIN32
     setlocale(LC_ALL, "");
-    wchar_t opt;
-    while ((opt = getopt(argc, argv, L"i:o:s:t:m:n:g:j:f:vxh")) != (wchar_t)-1)
+    while ((opt = getopt(argc, argv, L"i:o:s:t:m:n:g:j:f:q:vxh")) != -1)
     {
         switch (opt)
         {
@@ -483,6 +488,10 @@ int main(int argc, char** argv)
         case L'f':
             format = optarg;
             break;
+        case L'q':
+            quality = _wtoi(optarg);
+            if (quality >= -1 && quality <= 100)
+                break;
         case L'v':
             verbose = 1;
             break;
@@ -496,8 +505,7 @@ int main(int argc, char** argv)
         }
     }
 #else // _WIN32
-    int opt;
-    while ((opt = getopt(argc, argv, "i:o:s:t:m:n:g:j:f:vxh")) != -1)
+    while ((opt = getopt(argc, argv, "i:o:s:t:m:n:g:j:f:q:vxh")) != -1)
     {
         switch (opt)
         {
@@ -529,6 +537,10 @@ int main(int argc, char** argv)
         case 'f':
             format = optarg;
             break;
+        case L'q':
+            quality = _wtoi(optarg);
+            if (quality >= -1 && quality <= 100)
+                break;
         case 'v':
             verbose = 1;
             break;
@@ -841,6 +853,7 @@ int main(int argc, char** argv)
             // save image
             SaveThreadParams stp;
             stp.verbose = verbose;
+            stp.quality = quality;
 
             std::vector<ncnn::Thread*> save_threads(jobs_save);
             for (int i=0; i<jobs_save; i++)

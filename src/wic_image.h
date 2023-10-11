@@ -161,7 +161,7 @@ RETURN:
     return ret;
 }
 
-int wic_encode_jpeg_image(const wchar_t* filepath, int w, int h, int c, void* bgrdata)
+int wic_encode_jpeg_image(const wchar_t* filepath, int w, int h, int c, int quality, void* bgrdata)
 {
     // assert c == 3
 
@@ -180,7 +180,7 @@ int wic_encode_jpeg_image(const wchar_t* filepath, int w, int h, int c, void* bg
     VARIANT varValue;
     VariantInit(&varValue);
     varValue.vt = VT_R4;
-    varValue.fltVal = 1.0f;
+    varValue.fltVal = quality < 0 ? 1.0f : quality / 100.0f;
 
     if (CoCreateInstance(CLSID_WICImagingFactory1, 0, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))
         goto RETURN;
