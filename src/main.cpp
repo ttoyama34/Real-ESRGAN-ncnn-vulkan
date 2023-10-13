@@ -31,7 +31,7 @@ namespace fs = std::filesystem;
 #include <wchar.h>
 static wchar_t* optarg = NULL;
 static int optind = 1;
-static wchar_t getopt(int argc, wchar_t* const argv[], const wchar_t* optstring)
+static int getopt(int argc, wchar_t* const argv[], const wchar_t* optstring)
 {
     if (optind >= argc || argv[optind][0] != L'-')
         return -1;
@@ -54,7 +54,7 @@ static wchar_t getopt(int argc, wchar_t* const argv[], const wchar_t* optstring)
 
     optind++;
 
-    return opt;
+    return static_cast<int>(opt);
 }
 
 static std::vector<int> parse_optarg_int_array(const wchar_t* optarg)
@@ -113,8 +113,10 @@ static void print_usage()
     fprintf(stderr, "  -n model-name        model name (default=realesr-animevideov3, can be realesr-animevideov3 | realesrgan-x4plus | realesrgan-x4plus-anime | realesrnet-x4plus)\n");
     fprintf(stderr, "  -g gpu-id            gpu device to use (default=auto) can be 0,1,2 for multi-gpu\n");
     fprintf(stderr, "  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu\n");
+    fprintf(stderr, "  -k                   keep existing output image and skip the process\n");
     fprintf(stderr, "  -x                   enable tta mode\n");
     fprintf(stderr, "  -f format            output image format (jpg/png/webp, default=ext/png)\n");
+    fprintf(stderr, "  -q quality           output jpg/webp quality (0-100/-1=lossless or best, default=-1)\n");
     fprintf(stderr, "  -v                   verbose output\n");
 }
 
@@ -185,6 +187,7 @@ class LoadThreadParams
 public:
     int scale;
     int jobs_load;
+    bool keep_existing;
 
     // session data
     std::vector<path_t> input_files;
@@ -201,6 +204,18 @@ void* load(void* args)
     for (int i=0; i<count; i++)
     {
         const path_t& imagepath = ltp->input_files[i];
+        const path_t& outpath = ltp->output_files[i];
+
+        if (ltp->keep_existing && fs::exists(outpath))
+        {
+            // TODO: Support for the workaround for alpha image output when JPEG format is specified.
+#if _WIN32
+            fwprintf(stderr, L"output file %ls exists. Process skipped.\n", outpath.c_str());
+#else // _WIN32
+            fprintf(stderr, "output file %s exists. Process skipped.\n", outpath.c_str());
+#endif // _WIN32
+            continue;
+        }
 
         int webp = 0;
 
@@ -274,7 +289,7 @@ void* load(void* args)
             Task v;
             v.id = i;
             v.inpath = imagepath;
-            v.outpath = ltp->output_files[i];
+            v.outpath = outpath;
 
             v.inimage = ncnn::Mat(w, h, (void*)pixeldata, (size_t)c, c);
             v.outimage = ncnn::Mat(w * scale, h * scale, (size_t)c, c);
@@ -282,7 +297,7 @@ void* load(void* args)
             path_t ext = get_file_extension(v.outpath);
             if (c == 4 && (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG")))
             {
-                path_t output_filename2 = ltp->output_files[i] + PATHSTR(".png");
+                path_t output_filename2 = outpath + PATHSTR(".png");
                 v.outpath = output_filename2;
 #if _WIN32
                 fwprintf(stderr, L"image %ls has alpha channel ! %ls will output %ls\n", imagepath.c_str(), imagepath.c_str(), output_filename2.c_str());
@@ -338,12 +353,14 @@ class SaveThreadParams
 {
 public:
     int verbose;
+    int quality;
 };
 
 void* save(void* args)
 {
     const SaveThreadParams* stp = (const SaveThreadParams*)args;
     const int verbose = stp->verbose;
+    const int quality = stp->quality;
 
     for (;;)
     {
@@ -385,7 +402,7 @@ void* save(void* args)
 
         if (ext == PATHSTR("webp") || ext == PATHSTR("WEBP"))
         {
-            success = webp_save(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, (const unsigned char*)v.outimage.data);
+            success = webp_save(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, quality, (const unsigned char*)v.outimage.data);
         }
         else if (ext == PATHSTR("png") || ext == PATHSTR("PNG"))
         {
@@ -398,9 +415,10 @@ void* save(void* args)
         else if (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG"))
         {
 #if _WIN32
-            success = wic_encode_jpeg_image(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data);
+            success = wic_encode_jpeg_image(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, quality, v.outimage.data);
 #else
-            success = stbi_write_jpg(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data, 100);
+            int q = quality < 0 ? 100 : std::max(quality, 1);
+            success = stbi_write_jpg(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data, q);
 #endif
         }
         if (success)
@@ -445,13 +463,15 @@ int main(int argc, char** argv)
     std::vector<int> jobs_proc;
     int jobs_save = 2;
     int verbose = 0;
+    bool keep_existing = false;
     int tta_mode = 0;
     path_t format = PATHSTR("png");
+    int quality = -1;
 
+    int opt;
 #if _WIN32
     setlocale(LC_ALL, "");
-    wchar_t opt;
-    while ((opt = getopt(argc, argv, L"i:o:s:t:m:n:g:j:f:vxh")) != (wchar_t)-1)
+    while ((opt = getopt(argc, argv, L"i:o:s:t:m:n:g:j:f:q:kvxh")) != -1)
     {
         switch (opt)
         {
@@ -480,9 +500,16 @@ int main(int argc, char** argv)
             swscanf(optarg, L"%d:%*[^:]:%d", &jobs_load, &jobs_save);
             jobs_proc = parse_optarg_int_array(wcschr(optarg, L':') + 1);
             break;
+        case L'k':
+            keep_existing = true;
+            break;
         case L'f':
             format = optarg;
             break;
+        case L'q':
+            quality = _wtoi(optarg);
+            if (quality >= -1 && quality <= 100)
+                break;
         case L'v':
             verbose = 1;
             break;
@@ -496,8 +523,7 @@ int main(int argc, char** argv)
         }
     }
 #else // _WIN32
-    int opt;
-    while ((opt = getopt(argc, argv, "i:o:s:t:m:n:g:j:f:vxh")) != -1)
+    while ((opt = getopt(argc, argv, "i:o:s:t:m:n:g:j:f:q:kvxh")) != -1)
     {
         switch (opt)
         {
@@ -526,9 +552,16 @@ int main(int argc, char** argv)
             sscanf(optarg, "%d:%*[^:]:%d", &jobs_load, &jobs_save);
             jobs_proc = parse_optarg_int_array(strchr(optarg, ':') + 1);
             break;
+        case 'k':
+            keep_existing = true;
+            break;
         case 'f':
             format = optarg;
             break;
+        case L'q':
+            quality = _wtoi(optarg);
+            if (quality >= -1 && quality <= 100)
+                break;
         case 'v':
             verbose = 1;
             break;
@@ -816,6 +849,7 @@ int main(int argc, char** argv)
             ltp.jobs_load = jobs_load;
             ltp.input_files = input_files;
             ltp.output_files = output_files;
+            ltp.keep_existing = keep_existing;
 
             ncnn::Thread load_thread(load, (void*)&ltp);
 
@@ -841,6 +875,7 @@ int main(int argc, char** argv)
             // save image
             SaveThreadParams stp;
             stp.verbose = verbose;
+            stp.quality = quality;
 
             std::vector<ncnn::Thread*> save_threads(jobs_save);
             for (int i=0; i<jobs_save; i++)
