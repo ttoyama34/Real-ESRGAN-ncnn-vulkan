@@ -113,6 +113,7 @@ static void print_usage()
     fprintf(stderr, "  -n model-name        model name (default=realesr-animevideov3, can be realesr-animevideov3 | realesrgan-x4plus | realesrgan-x4plus-anime | realesrnet-x4plus)\n");
     fprintf(stderr, "  -g gpu-id            gpu device to use (default=auto) can be 0,1,2 for multi-gpu\n");
     fprintf(stderr, "  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu\n");
+    fprintf(stderr, "  -k                   keep existing output image and skip the process\n");
     fprintf(stderr, "  -x                   enable tta mode\n");
     fprintf(stderr, "  -f format            output image format (jpg/png/webp, default=ext/png)\n");
     fprintf(stderr, "  -q quality           output jpg/webp quality (0-100/-1=lossless or best, default=-1)\n");
@@ -186,6 +187,7 @@ class LoadThreadParams
 public:
     int scale;
     int jobs_load;
+    bool keep_existing;
 
     // session data
     std::vector<path_t> input_files;
@@ -202,6 +204,18 @@ void* load(void* args)
     for (int i=0; i<count; i++)
     {
         const path_t& imagepath = ltp->input_files[i];
+        const path_t& outpath = ltp->output_files[i];
+
+        if (ltp->keep_existing && fs::exists(outpath))
+        {
+            // TODO: Support for the workaround for alpha image output when JPEG format is specified.
+#if _WIN32
+            fwprintf(stderr, L"output file %ls exists. Process skipped.\n", outpath.c_str());
+#else // _WIN32
+            fprintf(stderr, "output file %s exists. Process skipped.\n", outpath.c_str());
+#endif // _WIN32
+            continue;
+        }
 
         int webp = 0;
 
@@ -275,7 +289,7 @@ void* load(void* args)
             Task v;
             v.id = i;
             v.inpath = imagepath;
-            v.outpath = ltp->output_files[i];
+            v.outpath = outpath;
 
             v.inimage = ncnn::Mat(w, h, (void*)pixeldata, (size_t)c, c);
             v.outimage = ncnn::Mat(w * scale, h * scale, (size_t)c, c);
@@ -283,7 +297,7 @@ void* load(void* args)
             path_t ext = get_file_extension(v.outpath);
             if (c == 4 && (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG")))
             {
-                path_t output_filename2 = ltp->output_files[i] + PATHSTR(".png");
+                path_t output_filename2 = outpath + PATHSTR(".png");
                 v.outpath = output_filename2;
 #if _WIN32
                 fwprintf(stderr, L"image %ls has alpha channel ! %ls will output %ls\n", imagepath.c_str(), imagepath.c_str(), output_filename2.c_str());
@@ -449,6 +463,7 @@ int main(int argc, char** argv)
     std::vector<int> jobs_proc;
     int jobs_save = 2;
     int verbose = 0;
+    bool keep_existing = false;
     int tta_mode = 0;
     path_t format = PATHSTR("png");
     int quality = -1;
@@ -456,7 +471,7 @@ int main(int argc, char** argv)
     int opt;
 #if _WIN32
     setlocale(LC_ALL, "");
-    while ((opt = getopt(argc, argv, L"i:o:s:t:m:n:g:j:f:q:vxh")) != -1)
+    while ((opt = getopt(argc, argv, L"i:o:s:t:m:n:g:j:f:q:kvxh")) != -1)
     {
         switch (opt)
         {
@@ -485,6 +500,9 @@ int main(int argc, char** argv)
             swscanf(optarg, L"%d:%*[^:]:%d", &jobs_load, &jobs_save);
             jobs_proc = parse_optarg_int_array(wcschr(optarg, L':') + 1);
             break;
+        case L'k':
+            keep_existing = true;
+            break;
         case L'f':
             format = optarg;
             break;
@@ -505,7 +523,7 @@ int main(int argc, char** argv)
         }
     }
 #else // _WIN32
-    while ((opt = getopt(argc, argv, "i:o:s:t:m:n:g:j:f:q:vxh")) != -1)
+    while ((opt = getopt(argc, argv, "i:o:s:t:m:n:g:j:f:q:kvxh")) != -1)
     {
         switch (opt)
         {
@@ -533,6 +551,9 @@ int main(int argc, char** argv)
         case 'j':
             sscanf(optarg, "%d:%*[^:]:%d", &jobs_load, &jobs_save);
             jobs_proc = parse_optarg_int_array(strchr(optarg, ':') + 1);
+            break;
+        case 'k':
+            keep_existing = true;
             break;
         case 'f':
             format = optarg;
@@ -828,6 +849,7 @@ int main(int argc, char** argv)
             ltp.jobs_load = jobs_load;
             ltp.input_files = input_files;
             ltp.output_files = output_files;
+            ltp.keep_existing = keep_existing;
 
             ncnn::Thread load_thread(load, (void*)&ltp);
 
